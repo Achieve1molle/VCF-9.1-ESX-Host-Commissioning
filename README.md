@@ -1,9 +1,34 @@
 
-# VCF9 ESXi Readiness (r6i3)
+# VCF9 ESXi Readiness 
 
-**VCF9-ESXi-Readiness-r6i3.ps1** is a Windows PowerShell 7+ **GUI** tool that preflights one or more **stand‑alone ESXi hosts** for VMware Cloud Foundation 9.x readiness. It validates core settings (NTP, services), inspects the presented **server certificate**, optionally runs **Broadcom Compatibility Guide (BCG)** checks for CPU/IO/SSD against simple JSON rule files, detects possible **vSAN residue**, and inventories **CDP/LLDP neighbors**—exporting everything to CSV and (optionally) Excel.
+VCF9-ESXi-Readiness is a Windows PowerShell 7+ **GUI** tool that preflights one or more **stand‑alone ESXi hosts** for VMware Cloud Foundation 9.x readiness. It validates core settings (NTP, services), inspects the presented **server certificate**, optionally runs **Broadcom Compatibility Guide (BCG)** checks for CPU/IO/SSD against simple JSON rule files, detects possible **vSAN residue**, and inventories **CDP/LLDP neighbors**—exporting everything to CSV and (optionally) Excel.
 
-> Version: **r6i3** (UI restored; prereq panel, ESXi version picker, BCG normalize/regex, per‑vmnic neighbor capture, removed temp signing files)
+> Version: Beta
+
+Supported Vendor/Model Entries for offline Cache of Hardware checks. Will run against other models but for hardware compatibility will shown unknown.
+CPU Models
+
+Intel Xeon 6 6747P
+Intel Xeon Gold 6330
+Intel Xeon Gold 6526Y
+Intel Xeon Silver 4314
+
+NIC / HBA Devices
+
+88SE9230 PCIe SATA 6Gb/s Controller
+Broadcom 5720 Dual Port 1GbE LOM
+Broadcom 57504 Quad Port 10/25GbE SFP28 OCP 3.0
+HBA355i
+ISP2812 Fibre Channel Controller
+Intel E810-XXV Dual Port 10/25GbE SFP28 Adapter PCIe Low Profile
+Intel E810-XXV Dual Port 10/25GbE SFP28 OCP NIC 3.0
+Lewisburg SATA AHCI Controller
+PERC H755
+
+vSAN SSDs
+
+3.2TB Enterprise NVMe Mixed Use AG Drive U.2 Gen4
+3.84TB Data Center NVMe Read Intensive AG Drive E3s Gen5
 
 ---
 
