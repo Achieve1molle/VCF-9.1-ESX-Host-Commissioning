@@ -1,224 +1,421 @@
+## VCF 9.1 ESX Host Validation and JSON Generator
 
-# VCF9 ESXi Readiness 
+PowerShell 7 / WPF utility for validating, remediating, and documenting **VCF 9.1 ESX host readiness** before host commissioning, with integrated **bulk host commission JSON generation**.
 
-VCF9-ESXi-Readiness is a Windows PowerShell 7+ **GUI** tool that preflights one or more **stand‑alone ESXi hosts** for VMware Cloud Foundation 9.x readiness. It validates core settings (NTP, services), inspects the presented **server certificate**, optionally runs **Broadcom Compatibility Guide (BCG)** checks for CPU/IO/SSD against simple JSON rule files, detects possible **vSAN residue**, and inventories **CDP/LLDP neighbors**—exporting everything to CSV and (optionally) Excel.
+**Current documented release:** v1.0 
+**Script file name:** VCF91-ESX-Validation-JSON-Generator-v1.0.ps1
 
-> Version: Beta
+**Author** Michael Molle
 
-Supported Vendor/Model Entries for offline Cache of Hardware checks. Will run against other models but for hardware compatibility will shown unknown.
-CPU Models
+This tool connects directly to standalone ESX hosts using PowerCLI and SSH, applies the desired ESX configuration, validates readiness, exports an Excel readiness report, and generates the VCF / SDDC Manager compatible host commissioning JSON file.
 
-Intel Xeon 6 6747P
-Intel Xeon Gold 6330
-Intel Xeon Gold 6526Y
-Intel Xeon Silver 4314
+### Purpose
 
-NIC / HBA Devices
+This tool provides an operator-friendly Windows UI for preparing ESX hosts for VCF 9.1 commissioning.
 
-88SE9230 PCIe SATA 6Gb/s Controller
-Broadcom 5720 Dual Port 1GbE LOM
-Broadcom 57504 Quad Port 10/25GbE SFP28 OCP 3.0
-HBA355i
-ISP2812 Fibre Channel Controller
-Intel E810-XXV Dual Port 10/25GbE SFP28 Adapter PCIe Low Profile
-Intel E810-XXV Dual Port 10/25GbE SFP28 OCP NIC 3.0
-Lewisburg SATA AHCI Controller
-PERC H755
+The script is intended for environments where an administrator needs to:
 
-vSAN SSDs
+- Validate multiple ESX hosts from a single UI.
+- Set hostname, lowercase FQDN, domain/search suffix, and DNS servers.
+- Validate DNS forward and reverse records.
+- Validate DNS query reachability from each ESX host to configured DNS servers.
+- Configure NTP servers and start/enable the NTP service.
+- Validate NTP synchronization and capture time drift from the automation workstation.
+- Validate and regenerate ESX certificates so the certificate name matches the lowercase host FQDN.
+- Validate ESX version is VCF 9.1 ready.
+- Validate and enforce IPv6 disabled, with reboot-required reporting.
+- Validate vSAN disk readiness and optionally clean vSAN residue from non-boot disks.
+- Disable SSH after the workflow completes.
+- Reboot hosts after remediation.
+- Load SDDC Manager network pools and generate bulk host commission JSON.
+- Generate a consistent timestamped run folder, log file, readiness report, and JSON output file.
 
-3.2TB Enterprise NVMe Mixed Use AG Drive U.2 Gen4
-3.84TB Data Center NVMe Read Intensive AG Drive E3s Gen5
+### Supported Use Case
 
----
+Use this tool when preparing standalone ESX hosts for VCF 9.1 commissioning.
 
-## ✨ Features
-- **WPF GUI** in PS7 (dark theme) with live log
-- **Prerequisite checks**: PowerShell 7+, VMware PowerCLI, ImportExcel (optional), OpenSSH client (optional), offline **vSAN HCL** JSON presence
-- **Target management**: add/remove rows, load/save CSV (Host/FQDN, Username, Password, Port)
-- **ESXi target version picker** (9.0.1.0, 9.0.0.1, 8.0 U3/U2/U1, 8.0) used by BCG rules
-- **Test Connection** per host (PowerCLI `Connect-VIServer`)
-- **Readiness run** per host (parallel using `ThreadJob`):
-  - NTP servers present and `ntpd` startup policy
-  - Server certificate **CN/SAN match** to host/FQDN
-  - Optional **vSAN residue** detection via `esxcli vsan storage list`
-  - Optional **BCG checks**:
-    - **CPU**: normalize model; match via `match` or optional `regex` rule → supported ESXi versions
-    - **IO (NIC/HBA)**: match by model *or* PCI VID/DID; driver name + **min version** rule checked via installed VIBs
-    - **SSD**: model match to supported ESXi versions
-  - **Neighbors**: CDP/LLDP discovery for each **vmnic**, including attached vSwitch/DVSwitch and peer switch/port details
-- **Outputs** per run:
-  - `PerHostRows.csv`
-  - `VCF9-ESXi-Readiness-<timestamp>.xlsx` with `HostRows` (+ `Neighbors` tab) when ImportExcel is installed
-  - timestamped log file under an auto‑created run folder: `VCF9-Readiness-YYYYMMDD-HHMMSS/`
-- **Cancel** running checks safely; **Open Log / Open Reports / Open Last Excel** convenience buttons
+Common scenarios include:
 
----
+- Preparing hosts before importing or commissioning them into VCF.
+- Correcting host identity, DNS, NTP, certificate, and IPv6 readiness items before VCF workflows.
+- Producing an auditable Excel report showing host readiness status and detailed evidence.
+- Generating a VCF host commissioning JSON file from the same host list used for validation.
+- Re-running validation safely after host reboots to confirm final state.
 
-## 📦 Requirements
-- **Windows** (WPF/WinForms UI)
-- **PowerShell 7 or later**
-- **VMware PowerCLI** module (installable from the UI)
-- **ImportExcel** module *(optional, for Excel output; installable from the UI)*
-- **OpenSSH client** (`ssh`, `scp`) *(optional)*
-- Network access from your workstation to each ESXi host **TCP/443**
+### Requirements
 
-> Optional reference data files placed either beside the script or in your chosen run folder:
-> - `bcg_cpu.json`, `bcg_io.json`, `bcg_ssd.json` *(enables BCG checks when **Enable Broadcom Compatibility Guide** is selected)*
-> - `all.json` *(offline vSAN HCL indicator in the Prereqs panel; not required for a run)*
+- Windows automation host or jump host.
+- PowerShell 7 or later recommended.
+- WPF-capable Windows session.
+- VMware PowerCLI module.
+- Posh-SSH module.
+- ImportExcel module recommended for `.xlsx` report output.
+- Network connectivity from the automation host to each ESX host over HTTPS/443.
+- SSH connectivity from the automation host to each ESX host over TCP/22 when remediation/readiness shell checks run.
+- ESX credentials, typically `root`, for the hosts being prepared.
+- DNS records already created for each ESX host FQDN.
+- Network connectivity from each ESX host to the configured DNS and NTP servers.
+- Optional SDDC Manager connectivity over HTTPS/443 for Network Pool inventory and JSON generation.
 
----
+### Input Model
 
-## 🚀 Quick start
-1. **Clone** this repo and open **PowerShell 7**.
-2. Run the script:
-   ```powershell
-   pwsh -File .\VCF9-ESXi-Readiness-r6i3.ps1
-   ```
-3. In **Prerequisites**, click **Install PowerCLI** (and **Install ImportExcel** if you want Excel output), then **Recheck**.
-4. In **ESXi Targets**:
-   - Click **Add Row**, enter **Host / FQDN**, **Username** (e.g., `root`), Password, and optionally **Port**.
-   - Or **Load Targets** from a CSV (see format below).
-   - Pick the **Target ESXi Version** you intend to validate against.
-5. Click **Test Connection** to verify logon, then **Run Readiness**.
-6. Use **Open Reports** to jump to the run folder for CSV/Excel, and **Open Log** for the detailed log.
+The Validation tab accepts host rows directly in the UI or through CSV load/save.
 
----
+Expected CSV columns:
 
-## 📄 CSV input format (Load/Save Targets)
-The grid Load/Save uses a simple schema:
-
-| Column      | Required | Notes                                                |
-|-------------|----------|------------------------------------------------------|
-| `TargetHost`| ✅        | Hostname or FQDN or IP of the ESXi host             |
-| `Username`  | ✅        | e.g., `root`                                         |
-| `Password`  | ❌        | Optional; can be left blank to type in the UI       |
-| `Port`      | ❌        | Defaults to `443` if missing                         |
-
-Example:
 ```csv
-TargetHost,Username,Password,Port
-esx01.lab.local,root,MySecret!,443
-esx02.lab.local,root,,443
+TargetHost,Username,Password
+pod01esx12.corp.example.com,root,VMware1!
+pod01esx13.corp.example.com,root,VMware1!
 ```
 
----
+#### Validation CSV Column Behavior
 
-## 📤 Outputs
-- **CSV**: `PerHostRows.csv` — one row per check per host with columns: `Host`, `Check`, `Status`, `Detail`
-- **Excel** *(if ImportExcel present)*: `VCF9-ESXi-Readiness-YYYYMMDD-HHMMSS.xlsx`
-  - **HostRows**: all checks
-  - **Neighbors**: only rows where `Check = Neighbor`
-- **Log**: `Readiness-YYYYMMDD-HHMMSS.log`
+<table>
+<tr><th>Column</th><th>Required</th><th>Description</th></tr>
+<tr><td>TargetHost</td><td>Yes</td><td>Lowercase ESX host FQDN to validate and remediate.</td></tr>
+<tr><td>Username</td><td>No</td><td>ESX username. Defaults to root when blank.</td></tr>
+<tr><td>Password</td><td>Yes</td><td>ESX password used for PowerCLI and SSH operations. Passwords are not written to the script configuration.</td></tr>
+</table>
 
-**Statuses** include `Pass`, `Fail`, `Warn`, `Unknown`, and informational entries.
+### Desired ESX Configuration
 
----
+The top-right UI panel contains the desired host configuration used by the readiness workflow.
 
-## 🧠 How the checks work
-### NTP & Service Policy
-- Reads configured NTP servers and validates the `ntpd` service startup policy (expects **on/automatic**).
+Required fields:
 
-### Certificate (CN/SAN) match
-- Opens an SSL stream to the host on **443**, reads `CN` and `SAN` entries and verifies that the entered **Host / FQDN** either matches the CN, is present in SAN, or is covered by a wildcard `*.domain` SAN.
+- **DNS servers** — one or more DNS server IP addresses separated by comma, semicolon, space, or newline.
+- **Search domains** — desired ESX domain/search suffix. The first entry is used as the primary ESX domain.
+- **NTP servers** — one or more NTP server names/IPs separated by comma, semicolon, space, or newline.
 
-### vSAN residue (optional)
-- Executes `esxcli vsan storage list` and inspects output for typical leftover **in‑use/claimed/disk group** markers. If found, flags **Fail**.
+Options:
 
-### Broadcom Compatibility Guide (optional)
-Provide any of the JSON files below to enable their respective checks. Files can live next to the script or in the selected run folder.
+- **Apply remediation** — apply desired configuration and enforce remediations.
+- **Clean vSAN residue** — destructive option that removes vSAN membership and resets non-boot disks to GPT after operator confirmation.
 
-#### `bcg_cpu.json` (example)
+### UI Workflow
+
+The UI is organized into these areas:
+
+- **Prerequisites**
+  - PowerShell version.
+  - VMware PowerCLI status.
+  - ImportExcel status.
+  - Posh-SSH status.
+  - Install buttons for missing modules.
+- **Desired ESX Configuration**
+  - DNS servers.
+  - Search domains.
+  - NTP servers.
+  - Apply remediation.
+  - Clean vSAN residue.
+- **Validation**
+  - Host FQDN.
+  - User Name.
+  - Password.
+  - Run Readiness.
+  - Add Host.
+  - Remove Selected.
+  - Load CSV.
+  - Save CSV.
+  - Download Example CSV.
+- **Results**
+  - Host-level readiness results.
+- **JSON Generator**
+  - SDDC Manager FQDN.
+  - User.
+  - Password.
+  - Network Pool Name inventory.
+  - Storage Type.
+  - Connect.
+  - Generate JSON.
+- **Log**
+  - Timestamped execution log in the UI and run folder.
+
+### How the Script Works
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Admin as Admin / Operator
+    participant Host as Automation Host (PowerShell WPF)
+    participant ESX as ESX Host
+    participant DNS as DNS Servers
+    participant NTP as NTP Servers
+    participant SDDC as SDDC Manager API
+    participant Out as Run Output Folder
+
+    Admin->>Host: Launch script
+    Host->>Out: Create timestamped run folder and log
+    Host->>Host: Check prerequisites and local tool certificate
+    Host-->>Admin: Show dark-theme WPF UI
+    Admin->>Host: Enter Desired ESX Configuration
+    Admin->>Host: Add/load ESX host rows
+    Admin->>Host: Click Run Readiness
+
+    loop Each ESX host
+        Host->>ESX: Connect-VIServer over HTTPS/443
+        Host->>ESX: Start SSH service for readiness commands
+        Host->>ESX: Set hostname, FQDN, domain, DNS servers
+        Host->>DNS: Resolve ESX FQDN forward/reverse from automation host
+        ESX->>DNS: Query configured DNS server for host FQDN
+        DNS-->>ESX: DNS response
+        Host->>ESX: Verify hostname, FQDN, domain, DNS functional state
+        Host->>ESX: Set NTP servers and enable/start NTP service
+        ESX->>NTP: Synchronize with NTP peers
+        Host->>ESX: Check ntpq peer/reach status
+        Host->>ESX: Compare ESX UTC time with automation host UTC time
+        Host->>ESX: Check vSAN disk state
+        alt Clean vSAN residue selected
+            Host->>ESX: Remove vSAN membership and reset non-boot disks
+        end
+        Host->>ESX: Check certificate lowercase FQDN match
+        alt Certificate does not match and remediation enabled
+            Host->>ESX: Run /sbin/generate-certificates
+        end
+        Host->>ESX: Check ESX version
+        Host->>ESX: Enforce IPv6 disabled when remediation is enabled
+        Host->>ESX: Disable SSH
+        Host->>ESX: Send reboot request
+        Host-->>Out: Record details and summary rows
+    end
+
+    Host->>Out: Export VCF91-ESX-Validation-yyyyMMdd-HHmmss.xlsx
+    Admin->>Host: Open Results / Open Report
+
+    opt Generate bulk commission JSON
+        Admin->>Host: Enter SDDC Manager credentials and Connect
+        Host->>SDDC: POST /v1/tokens
+        SDDC-->>Host: Bearer token
+        Host->>SDDC: GET /v1/network-pools
+        SDDC-->>Host: Network Pool inventory
+        Host-->>Admin: Populate Network Pool dropdown
+        Admin->>Host: Select storage type and Generate JSON
+        Host->>Out: Write bulk-commission-hosts-yyyyMMdd-HHmmss.json
+    end
+```
+
+### Readiness Checks and Remediation Behavior
+
+#### Hostname / DNS / Domain Set
+
+When **Apply remediation** is selected, the script sets:
+
+- short hostname from the FQDN host prefix.
+- lowercase FQDN from the host row.
+- domain from the Search domains field.
+- DNS servers from the DNS servers field.
+- DNS search suffix from the Search domains field.
+
+The script attempts PowerCLI first and then uses ESX shell commands as fallback/confirmation.
+
+#### Hostname / DNS / Domain Verify
+
+The script separately verifies:
+
+- Hostname matches the host row short name.
+- FQDN matches the lowercase host row FQDN when ESX reports it.
+- Domain matches the desired domain.
+- DNS server list contains the desired DNS servers, or DNS functional query succeeds when ESX DNS list parsing returns blank.
+
+This prevents false failures when ESX command output does not render DNS server inventory as expected but DNS resolution from the host is working.
+
+#### DNS Forward / Reverse
+
+The automation host validates:
+
+- forward A record lookup for the ESX FQDN.
+- reverse PTR lookup for the returned address.
+- PTR result matches lowercase ESX FQDN.
+
+#### DNS Reachability
+
+Each ESX host queries the configured DNS servers. The check passes when at least one configured DNS server successfully resolves the ESX FQDN.
+
+#### NTP Config and Sync
+
+The script sets desired NTP servers when needed, starts/enables the NTP service, checks NTP peer state, and retries synchronization checks. If NTP has not selected or reached a peer by attempt 5, the script restarts the NTP service and continues checking.
+
+#### Time Drift
+
+The script records:
+
+- automation host UTC time.
+- ESX host UTC time.
+- drift in seconds.
+- absolute drift in seconds.
+
+The Time Drift check is intended to provide additional evidence when NTP status is ambiguous.
+
+#### Certificate
+
+The script checks certificate subject/SAN names and requires the lowercase ESX FQDN to pass. If the certificate does not match and remediation is enabled, the script runs:
+
+```bash
+/sbin/generate-certificates
+```
+
+The host reboot at the end of the workflow reloads the management services.
+
+#### IPv6
+
+When **Apply remediation** is selected, v40 always enforces IPv6 disabled and records the result as `Remediated` because ESXi requires reboot before DCUI and the management stack reflect the final disabled state.
+
+The script runs:
+
+```bash
+esxcli network ip set --ipv6-enabled=false
+esxcli system settings advanced set -o /Net/IPv6Enabled -i 0
+```
+
+The report includes IPv6 evidence before and after the disable request.
+
+#### vSAN
+
+Without cleanup selected, the script reports vSAN disk state and treats **Eligible for use by VSAN** as pass.
+
+When **Clean vSAN residue** is selected, the script prompts for confirmation before destructive cleanup. The cleanup skips boot disks and resets non-boot disks.
+
+### Output Files
+
+Each run creates a folder similar to:
+
+```text
+VCF91-Validation-Json-Run-YYYYMMDD-HHMMSS
+```
+
+Typical files include:
+
+```text
+ValidationJson-YYYYMMDD-HHMMSS.log
+VCF91-ESX-Validation-YYYYMMDD-HHMMSS.xlsx
+validation-targets.csv
+example-validation-targets.csv
+bulk-commission-hosts-YYYYMMDD-HHMMSS.json
+```
+
+### Report Worksheets
+
+The Excel report contains:
+
+- **Hosts** — host-level summary status.
+- **Details** — per-host evidence for every check.
+
+### Host Summary Fields
+
+<table>
+<tr><th>Field</th><th>Description</th></tr>
+<tr><td>Host</td><td>Target ESX host FQDN.</td></tr>
+<tr><td>FQDN</td><td>Lowercase ESX FQDN used for validation.</td></tr>
+<tr><td>HostnameDNSDomainSet</td><td>Status of setting hostname, FQDN, DNS, and domain.</td></tr>
+<tr><td>HostnameDNSDomainVerify</td><td>Status of verifying hostname, FQDN, DNS, and domain.</td></tr>
+<tr><td>DNSForwardReverse</td><td>Status of forward and reverse DNS validation.</td></tr>
+<tr><td>DNSReachability</td><td>Status of DNS query from ESX host to configured DNS server.</td></tr>
+<tr><td>NTPConfig</td><td>Status of NTP server list and NTP service state.</td></tr>
+<tr><td>NTPSync</td><td>Status of NTP peer selection/reachability.</td></tr>
+<tr><td>TimeDrift</td><td>Status of UTC time comparison between automation host and ESX host.</td></tr>
+<tr><td>TimeDriftSeconds</td><td>Signed drift in seconds: ESX UTC minus automation host UTC.</td></tr>
+<tr><td>vSAN</td><td>Status of vSAN readiness or cleanup.</td></tr>
+<tr><td>Certificate</td><td>Status of lowercase FQDN certificate validation or remediation.</td></tr>
+<tr><td>ESXVersion</td><td>Status of ESX version check.</td></tr>
+<tr><td>IPv6</td><td>Status of IPv6 disable check/remediation.</td></tr>
+<tr><td>Overall</td><td>Overall readiness result.</td></tr>
+</table>
+
+### Result Status Values
+
+<table>
+<tr><th>Result</th><th>Meaning</th></tr>
+<tr><td>Pass</td><td>Check completed successfully and desired state is already met.</td></tr>
+<tr><td>Remediated</td><td>Desired state was applied or requested successfully.</td></tr>
+<tr><td>N/A</td><td>Check or remediation was not applicable, usually because the desired state was already met or remediation was disabled.</td></tr>
+<tr><td>Fail</td><td>Check or remediation failed. Review the Details worksheet and log.</td></tr>
+</table>
+
+### JSON Generator Behavior
+
+The JSON Generator tab connects only to SDDC Manager for Network Pool inventory:
+
+```text
+POST /v1/tokens
+GET  /v1/network-pools
+```
+
+The generated JSON contains one host object per Validation tab row.
+
+Example structure:
+
 ```json
-[
-  { "match": "Xeon Gold 6330", "esxi": ["9.0.1.0", "9.0.0.1", "8.0 U3"] },
-  { "regex": "^AMD EPYC\\s+74..", "match": "EPYC 74xx", "esxi": ["8.0 U3"] }
-]
+{
+  "hosts": [
+    {
+      "fqdn": "pod01esx12.corp.example.com",
+      "username": "root",
+      "storageType": "VSAN",
+      "password": "VMware1!",
+      "networkPoolName": "example-network-pool",
+      "vvolStorageProtocolType": ""
+    }
+  ]
+}
 ```
-- The script **normalizes** CPU model strings (removes ®/™/"CPU" markers, trims SKU suffixes) before matching.
-- A rule matches if the normalized CPU contains `match` **or** if the raw CPU string satisfies `regex`.
 
-#### `bcg_io.json` (example)
+The UI displays **vSAN OSA**, and the generated JSON maps this to:
+
 ```json
-[
-  {
-    "class": "NIC",
-    "match": "Broadcom 57414",
-    "driver": { "name": "bnxtnet", "min": "216.0.50" },
-    "esxi": ["9.0.1.0", "8.0 U3"]
-  },
-  {
-    "class": "HBA",
-    "vid": "1000", "did": "0073",
-    "driver": { "name": "lsi_msgpt3", "min": "18.00.02" },
-    "esxi": ["8.0 U2", "8.0 U3"]
-  }
-]
-```
-- NIC/HBA devices are matched by **model** (`match`) or by **PCI VID/DID**.
-- Installed **driver name** and **version** are derived from VIB listings; version is compared using a numeric segment comparison.
-
-#### `bcg_ssd.json` (example)
-```json
-[
-  { "match": "Intel SSD D3-S4610", "esxi": ["8.0 U3"] },
-  { "match": "Samsung PM1735", "esxi": ["9.0.0.1", "9.0.1.0"] }
-]
-```
-- All devices where `IsSsd = true` are considered; model is matched using `match`.
-
-> **Note**: These JSON files are **not** official BCG exports—use them as light‑weight mapping lists for your environment.
-
-### Neighbors (CDP/LLDP)
-- For each **vmnic**, the script queries network hints and records the attached **standard vSwitch or DVSwitch**, neighbor **switch name/ID**, and **port**/**port ID** when advertised.
-
----
-
-## 🔐 Security & privacy
-- Credentials you type are used only for the live session to `Connect-VIServer`. The script does **not** persist passwords unless **you** choose to save a targets CSV that includes them.
-- Logs and reports contain hostnames and configuration findings; review before sharing outside your org.
-- PowerCLI certificate validation is set to **Ignore** for connectivity, but the script’s **Certificate** check still reports CN/SAN mismatches to encourage proper host cert hygiene.
-
----
-
-## 🧰 Troubleshooting
-- **WPF assembly load failed** → Run on **Windows** with **PowerShell 7+**.
-- **PowerCLI/ImportExcel not found** → Use the **Install** buttons in the Prereqs panel, or install from PSGallery.
-- **Connect failure** → Verify TCP/443 reachability, credentials, and that host API is enabled.
-- **Excel export failed** → Ensure **ImportExcel** is installed; otherwise use the CSV which is always produced.
-- **BCG shows Unknown** → Provide the corresponding `bcg_*.json` file with a rule for your hardware; verify model/PCI IDs/driver names.
-
----
-
-## 🗂️ Repository layout
-```
-/ (repo root)
-├─ VCF9-ESXi-Readiness-r6i3.ps1
-├─ bcg_cpu.json            (optional)
-├─ bcg_io.json             (optional)
-├─ bcg_ssd.json            (optional)
-└─ all.json                (optional, offline vSAN HCL)
+"storageType": "VSAN"
 ```
 
-Run artifacts are written under: `VCF9-Readiness-YYYYMMDD-HHMMSS/`.
+### Recommended Operational Flow
 
----
+- Place the script on the Windows automation host.
+- Launch with PowerShell.
+- Confirm prerequisites are Found.
+- Enter DNS servers, NTP servers, and Search domains.
+- Add hosts manually or load CSV.
+- Keep **Apply remediation** checked for first-run host preparation.
+- Leave **Clean vSAN residue** unchecked unless destructive disk cleanup is intentionally required.
+- Click **Run Readiness**.
+- Allow the host to reboot after the workflow.
+- Re-run the tool after reboot if you want final post-reboot confirmation, especially for IPv6 and certificates.
+- Open the Excel report and archive the run folder.
+- Use the JSON Generator tab to connect to SDDC Manager, select the Network Pool, and generate the host commission JSON.
 
-## 🤝 Contributing
-PRs are welcome for:
-- New/updated sample BCG rule entries
-- Additional checks (e.g., syslog, lockdown mode, SSH policy)
-- Usability tweaks to the UI
+### Troubleshooting
 
-Please include a brief description and test output when contributing.
+#### IPv6 shows Remediated but DCUI still shows IPv6 enabled
 
----
+IPv6 disable requires a reboot. v40 reports IPv6 as Remediated when the disable request is sent. Verify DCUI after the host reboot completes.
 
-## 📜 License
-> _Add your project license here (e.g., MIT, Apache-2.0)._
+#### Reboot request logs a management warning
 
----
+This is expected for standalone ESX host reboot. The reboot request can be accepted, and then management connectivity drops before PowerCLI receives a clean acknowledgement.
 
-## 🙏 Acknowledgments
-- Built with **PowerShell 7**, **WPF**, and **VMware PowerCLI**.
-- Thanks to everyone sharing operational readiness best practices in the community.
+#### DNS server list is blank in the Details worksheet
+
+Some ESX command output can return a blank DNS list even when DNS is configured. The script accepts DNS verification when DNS functional query from the ESX host succeeds.
+
+#### NTP Sync initially fails
+
+The script retries NTP sync checks and restarts NTP after attempt 5. Review the NTP Sync detail for selected `*` peers or non-zero reach values.
+
+#### Certificate shows Remediated
+
+The certificate did not initially match lowercase FQDN, so `/sbin/generate-certificates` was run. The final reboot reloads host management services.
+
+#### vSAN cleanup is dangerous
+
+Only select **Clean vSAN residue** when you intentionally want to remove vSAN membership and reset non-boot disks. The script prompts before cleanup.
+
+### Security Notes
+
+- ESX passwords are not saved to disk by the script configuration.
+- Passwords are held in memory during the session.
+- The validation target CSV can contain passwords if you choose to save/load it; protect the file accordingly.
+- SDDC Manager credentials are used only for Network Pool inventory and JSON generation.
+- The generated JSON contains host passwords and should be protected.
+- Logs and reports may contain hostnames, server names, IP addresses, NTP server names, and certificate details.
+
+### Disclaimer
+
+Validate this workflow in a controlled environment before production use. Confirm that each host is intended for remediation and reboot before running the workflow. Use destructive vSAN cleanup only when the target disks are confirmed safe to reset.
