@@ -1,169 +1,134 @@
-# VCF 9.1 ESX Host Validation and JSON Generator
+# VCF 9.1 ESXi Host Validation and JSON Generator
 
-`VCF91-ESX-Validation-JSON-Generator-v1.7.4.ps1` is a Windows PowerShell 7 WPF utility for ESX host readiness checks, optional remediation, and bulk host commission JSON generation. This README describes the behavior of **v1.7.4**, including its simplified remediation control and bounded, automatic post-reboot validation.
+**Release:** v2.0  
+**Platform:** Windows desktop, PowerShell 7 or later, WPF  
+**Modules:** VCF.PowerCLI, ImportExcel, Posh-SSH  
+**Concurrency:** 3 to 5 isolated host workers; selecting 3 does not require three target hosts.
 
-> **Release:** v1.7.4  
-> **Runtime:** PowerShell 7 on Windows, interactive WPF session  
-> **Modules:** `VCF.PowerCLI`, `ImportExcel`, `Posh-SSH`  
-> **Execution:** 3 to 5 isolated host workers concurrently
+This utility checks ESXi host readiness for VCF 9.1 commissioning, optionally remediates supported configuration, produces host and executive reports, and separately generates bulk host-commission JSON. Validation-only is the default. The JSON Generator is a separate UI action; running readiness does **not** automatically generate commission JSON.
 
-## Choose the run mode
+## Workflow
 
-| UI selection | Behavior |
-| --- | --- |
-| **Apply remediation** unchecked (default) | Run the host readiness checks without requesting remediation or a reboot. The tool may temporarily start SSH to perform checks and disables SSH afterward. |
-| **Apply remediation** checked | For each eligible host, perform one remediation pass, request **one** reboot, wait for a changed boot time, perform **one** fresh validation-only pass, and stop regardless of the final result. |
-| **Clean vSAN residue** checked | Run the optional destructive disk-cleanup routine during remediation. This control is available only when **Apply remediation** is checked and requires a separate warning acknowledgment. |
-
-There is **no separate Reboot + revalidate checkbox**. In v1.7.4, reboot and one post-reboot validation pass are inseparable parts of the **Apply remediation** workflow. The run-review dialog shows the target hosts, run mode, reboot scope, and cleanup selection before the run starts. Selecting **Yes** authorizes the displayed scope; selecting **No** cancels it.
-
-**Important:** Checking **Apply remediation** does not guarantee that every listed host will reboot. Each host must pass the reboot preflight before remediation begins. The tool does not put hosts into maintenance mode, evacuate VMs, or automatically take hosts out of maintenance mode afterward.
-
-## Remediation and post-reboot workflow
+The Mermaid diagram describes the actual host-worker branches. Report export follows readiness processing; JSON generation is independent and requires a separate button click.
 
 ```mermaid
 flowchart TD
-    A[Enter hosts, credentials, DNS, domain and NTP] --> B{Apply remediation?}
-    B -->|No| V[One validation-only pass]
-    V --> Z[Report and stop]
-    B -->|Yes| C[Review host list, reboot scope and optional cleanup]
-    C --> D{Host in maintenance mode with no powered-on VMs?}
-    D -->|No| F[Record failure; do not remediate or reboot]
-    D -->|Yes| E[One remediation and pre-reboot assessment]
-    E --> R[Request one reboot even if pre-reboot checks fail]
-    R --> W{New boot time observed within 20 minutes?}
-    W -->|No| T[Record reboot failure; do not retry]
-    W -->|Yes| P[One fresh validation-only pass]
-    P --> Q[Report final result and stop, even on failure]
-    F --> Z
-    T --> Z
-    Q --> Z
+    A[Add hosts or load CSV; enter DNS, search domain, NTP, credentials] --> B[Select External or vSAN storage intent; set max time drift]
+    B --> C[Validate inputs; review target hosts and operational impact]
+    C --> D{Apply remediation selected?}
+    D -- No: default --> V[One validation-only host pass]
+    V --> R[Collect host results]
+    D -- Yes --> P{Connect and zero powered-on VMs?}
+    P -- No --> F[Record preflight failure; no remediation or reboot]
+    F --> R
+    P -- Yes --> M[One remediation and pre-reboot assessment]
+    M --> Q{Any remediation recorded or attempted?}
+    Q -- No --> N[Reboot not required; use pre-reboot assessment as final result]
+    N --> R
+    Q -- Yes --> X{Second powered-on-VM check and boot time available?}
+    X -- No --> E[Record reboot failure; no post-reboot pass]
+    E --> R
+    X -- Yes --> Y[Issue at most one reboot request; wait up to 600 seconds]
+    Y --> Z{Later boot time verified?}
+    Z -- No --> E
+    Z -- Yes --> W[One fresh validation-only post-reboot pass]
+    W --> R
+    R --> O[Export Excel or CSV fallback and executive HTML; retain logs and artifacts in run folder]
+    O --> S[Stop host workflow; no automatic retry]
+    J[Separate JSON Generator action] --> K[Validate inputs, network pool, storage type and credentials]
+    K --> L[Write bulk commission JSON with plaintext host passwords]
 ```
 
-For each host in remediation mode:
+**Interpretation:** A pre-reboot check may fail after a configuration change was attempted; that failure alone does not cancel an already authorized reboot. The workflow records whether a change was attempted; it does not prove that every attempted change succeeded. A reboot is never requested if the initial powered-on-VM preflight fails. The tool does not put a host into maintenance mode, evacuate VMs, or take a host out of maintenance mode. The reboot command uses `-Force` to permit a standalone host reboot without a maintenance-mode requirement. Standalone commissioning hosts do not need to be in maintenance mode for this script's preflight. Reboot verification requires a later boot time, not merely restored network connectivity. A lost API acknowledgement does not cause a second reboot request.
 
-1. Confirm that the host is **already in maintenance mode** and that **zero VMs are powered on**. If the preflight fails, the host is not remediated or rebooted.
-2. Apply the selected configuration and record pre-reboot findings. Checks include hostname/FQDN, DNS, NTP, certificate, ESX version, IPv6, and vSAN readiness. **Pre-reboot overall `Fail` does not itself suppress the authorized reboot** after the preflight succeeds.
-3. Recheck maintenance mode and powered-on VMs immediately before the reboot request. The script issues at most **one** `Restart-VMHost` request for that host, without `-Force`. If the API loses the acknowledgment, the script waits for evidence of a reboot rather than sending another request.
-4. Poll for host management connectivity and verify that the reported **boot time is later than the pre-reboot boot time**. The configured wait is **1,200 seconds (20 minutes)**. A timeout or failed preflight is reported as a reboot-verification failure; the tool does not attempt a second reboot.
-5. Only after the reboot is verified, run **one validation-only pass**. Remediation, vSAN cleanup, and reboot authorization are disabled for this pass. The host workflow ends regardless of whether the final result is `Pass` or `Fail`.
+## Prerequisites and launch
 
-The script does **not** automatically exit maintenance mode. Review the final report and host state before returning a host to service. The host workflow's validation-only pass can temporarily start SSH and disables it afterward; it does not request a reboot.
+- Run on **Windows** with an interactive desktop and **PowerShell 7+** in STA mode. The launcher can relaunch in PowerShell 7 STA mode and attempts to create, trust, and use a CurrentUser self-signed code-signing certificate. The supplied v2.0 script copy has no inherited Authenticode signature because its contents changed; review the trust behavior and sign the release using your approved process before deployment.
+- Install **VCF.PowerCLI**, **ImportExcel**, and **Posh-SSH**. The UI includes a separate installation button for each module.
+- Provide administrative credentials for each target ESXi host, management HTTPS/TCP 443 and SSH/TCP 22 connectivity, and functioning DNS and NTP paths for the checks. The tool may start SSH temporarily; it preserves an already-running SSH service and verifies that SSH is stopped if the tool started it.
+- For remediation, obtain approved change scope and review effects of DNS/NTP/certificate/IPv6 changes and possible concurrent reboots. The UI offers 3, 4, or 5 parallel workers. For serialized changes, launch one target host at a time.
+- Network-pool inventory lookup additionally needs SDDC Manager access and credentials. A network-pool name can instead be entered in the editable field.
 
-> **Operational caution:** A run can have 3 to 5 host workers active at once. If simultaneous reboots are not authorized, run a single target host per launch or adjust the workflow under change control. The parallel-node selector is not a one-host throttle.
-
-## Requirements and preparation
-
-- Windows with an interactive desktop session and PowerShell 7 or later.
-- The `VCF.PowerCLI`, `ImportExcel`, and `Posh-SSH` modules. The three install buttons each install their named module.
-- Administrative ESX credentials for every target host. Password cells are **blank when no password is present** and show stars only after a password has been entered or loaded. Missing target passwords block readiness and JSON generation.
-- HTTPS TCP 443 and SSH TCP 22 from the automation workstation to the target hosts; DNS and NTP connectivity appropriate for the checks.
-- For remediation: approved change scope, a maintenance window, hosts already in maintenance mode, and zero powered-on VMs. Confirm vSAN and networking impact before disabling IPv6 or performing disk cleanup.
-- For network-pool lookup: access to the SDDC Manager endpoint and appropriate credentials.
-
-**Launch:**
+Use the accompanying `VCF91-ESX-Validation-JSON-Generator-v2.0.ps1` file. Do not rename the older `.ps1.txt` source and assume its signature remains valid after editing. Example:
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -STA -File ".\VCF91-ESX-Validation-JSON-Generator-v1.7.4.ps1"
+pwsh -NoProfile -ExecutionPolicy Bypass -STA -File ".\VCF91-ESX-Validation-JSON-Generator-v2.0.ps1"
 ```
 
-The script may create or reuse a Current User code-signing certificate and relaunch in PowerShell 7 STA mode if needed. Its output directory is created under the current working directory.
+The script creates a timestamped run directory beneath the current working directory. This documentation review did not run the WPF UI or perform host-level integration tests.
 
-## Host entry and CSV
+## Configure hosts and credentials
 
-Use **Add Host** or **Load CSV**. Populate the desired DNS servers, search domains, and NTP servers before running. An example CSV can be saved with **Save Example CSV**; the example does **not** contain a real password.
+Use **Add Host** or **Load Hosts**. Supply DNS servers, a primary search domain, NTP servers, and an explicit **Storage intent** of `External` or `vSAN`. Enter a maximum time drift in seconds; the UI defaults to **5**, and input validation accepts a number greater than 0 and no greater than **300**. Host FQDNs are normalized to lowercase, must match `<host>.<primary search domain>`, and must be unique. Blank usernames default to `root`.
+
+Enter a password per host, or select **Use one password for all hosts** and enter it in the dedicated shared-password box. Shared mode shades and disables individual host password cells; the worker credential snapshot is checked before a run. A missing target password blocks both readiness and JSON generation. The UI displays blank individual password cells until a password is entered.
+
+**Save Hosts** writes `validation-targets.csv` in the run folder with the password column **blank**, even if a password was entered. Re-enter passwords after loading that CSV. **Save Example Hosts** creates a password-free template. A loaded CSV can contain a `Password` field; treat any legacy or manually populated CSV with real passwords as sensitive. In shared-password mode, the dedicated shared-password box must be re-entered after loading. Current export fields are:
 
 ```csv
-TargetHost,Username,Password,DnsServers,SearchDomains,NtpServers
-pod01esx12.corp.example.com,root,ReplaceWithRealPassword,192.0.2.10;192.0.2.11,corp.example.com,time1.example.com;time2.example.com
+TargetHost,Username,Password,DnsServers,SearchDomains,NtpServers,StorageIntent,MaxDriftSeconds,SharedPasswordMode
+esx01.corp.example.com,root,,192.0.2.10;192.0.2.11,corp.example.com,time1.example.com;time2.example.com,External,5,False
 ```
 
-- `TargetHost` is the ESX FQDN and is normalized to lowercase.
-- `Username` defaults to `root` when empty.
-- `Password` must be provided for each nonempty target host.
-- DNS and NTP lists may use commas, semicolons, or spaces.
-- **Save CSV** exports the current targets and desired configuration, including passwords **in plaintext**. Protect and delete the CSV according to your organization's credential-handling rules.
+## Run modes and safety
 
-The UI displays a count of targets with entered passwords. **Stop Queuing New Hosts** prevents additional workers from starting and records queued hosts as skipped; it **does not cancel active workers**, their authorized remediation, or their authorized reboot. Wait for active workers and reporting to finish before closing the application.
+### Validation only (default)
 
-## Checks and evidence
+Leave **Apply remediation** unchecked. The tool performs one host pass, collects evidence, and does not request host remediation, vSAN disk cleanup, or a reboot. Temporary SSH startup and restoration may still occur for host-side checks. The report records `RebootStatus` and `PostRebootStatus` as `N/A`.
 
-- **Host identity and DNS:** requested hostname, lowercase FQDN, DNS servers, domain/search suffix, workstation forward A and reverse PTR checks, and ESX DNS reachability.
-- **NTP:** configured servers, service state, peer-selection checks, and time drift.
-- **Certificate:** lowercase FQDN matching; generation is attempted in remediation mode if needed. Final state is assessed in the post-reboot pass.
-- **IPv6:** v1.7's persistent-setting remediation and evidence collection, with v1.7.2's fail-closed handling of missing or contradictory values. IPv6 evidence artifacts retain before/after state and command results. A post-reboot failure is reported, **not** remediated again.
-- **vSAN:** raw-disk eligibility and meaningful ownership detection. **Clean vSAN residue** is a separate, destructive opt-in and is never performed in the post-reboot pass.
-- **Version:** installed ESX version is compared with the script's 9.1.0 minimum.
+### Apply remediation
 
-The Excel report includes **Hosts** and **Details** worksheets. In remediation mode, details distinguish `Pre-reboot / ...`, `Reboot verification`, and `Post-reboot / ...` checks. The host summary records the pre-reboot overall result, reboot status, post-reboot status, and final overall result. If reboot is not verified, the post-reboot pass is **not run**, and the host is reported as failed. A final `Fail` does not initiate another remediation cycle.
+Check **Apply remediation**, review the exact host list and risk text, acknowledge the impact, and select **Start run**. The script requires **zero powered-on VMs** before it begins host changes and checks again immediately before a reboot. Maintenance mode is **not** a preflight requirement. The tool does not evacuate VMs or manage maintenance mode.
 
-Each launch creates a timestamped `VCF91-Validation-Json-Run-YYYYMMDD-HHMMSS` directory containing the run log, Excel report when available, diagnostic artifacts, and worker stderr/stdout files where applicable. A diagnostic ZIP is created at the end of readiness processing. Worker startup failures include exit-code and stderr details rather than only `Worker returned no result`.
+For each eligible host, the tool performs one remediation/pre-reboot assessment. If no remediation was recorded **and** no mutation was attempted, it reports `RebootStatus: Not required` and uses that assessment as the final result. If a mutation was attempted or recorded, it requests **at most one** reboot using `Restart-VMHost -Force`, waits up to **600 seconds (10 minutes)** for a boot time later than the pre-reboot value, then runs **exactly one** fresh validation-only pass if reboot verification succeeds. It never automatically retries remediation or reboot. A reboot timeout or failed reboot preflight prevents post-reboot validation and is reported as failure.
 
-## JSON generator and credential security
+**Clean vSAN residue is disabled.** The checkbox is disabled and worker input requesting cleanup is rejected. No automatic disk wiping or vSAN partition removal is part of this release. Investigate storage residue with a separately approved procedure.
 
-The **JSON Generator** tab can authenticate to SDDC Manager, load network-pool names, and create a bulk commission JSON file. JSON generation is a **separate action**; running readiness does not automatically generate commission JSON. Generated JSON contains ESX host credentials **in plaintext**. Protect it, the target CSV, the run directory, and the diagnostic ZIP with appropriate access controls and retention practices. Do not attach these artifacts to an unrestricted ticket or share them without checking for secrets.
+**Stop Queuing New Hosts** skips targets that have not started; it does **not** cancel active workers, already-authorized changes, or reboot requests. The application blocks closing while a run is active and waits for active workers before reporting.
+
+## Checks and interpretation
+
+- **Identity and DNS:** hostname, FQDN, domain, configured DNS list, workstation forward A and reverse PTR lookups against each specified DNS server, and functional host-side DNS queries. DNS source-interface binding is **not guaranteed** by the diagnostic output.
+- **NTP and clock:** configured NTP servers and service, host-side NTP-name resolution, observed peer replies and selected-peer synchronization, plus UTC drift against the configured threshold. The synchronization loop samples up to **20 times** at approximately **10-second** intervals. A UDP port probe is not treated as proof of an NTP reply; a conditional NTP service restart can occur in remediation mode.
+- **Certificate:** checks whether the presented certificate has the expected lowercase host FQDN name. **Chain trust and certificate-expiration validation are not performed.** Remediation can run certificate generation when the name check fails; final state is assessed after a verified reboot.
+- **IPv6:** checks the ESX global network IPv6 state, with an optional advanced-setting cross-check when available. Missing or contradictory evidence fails closed. A disable request in remediation mode requires reboot and subsequent validation to establish the final state.
+- **Storage intent and vSAN:** checks disk/ownership evidence even for external-storage hosts. `External` returns `N/A` only when the required evidence is available and no vSAN ownership or identifiable residue is found; missing evidence or ownership fails. `vSAN` requires at least one eligible raw disk and no detected ownership/residue. Partitioned disks are **not** automatically classified as vSAN residue on external-storage hosts.
+- **Version and SSH:** requires installed ESX **9.1.0 or later** and records SSH cleanup/restoration status. An unverified SSH cleanup can fail the host result.
+
+Check details can show **Pass**, **Fail**, **Remediated**, **N/A**, **Pending**, or **Not run**; the host summary can also show **Skipped** for a target that was never started. `N/A` for external-storage disk eligibility is not a failed vSAN test. A `Pending` NTP result is not an overall Pass. When preflight or connection fails, checks that never started are marked `Not run` rather than implying they passed.
+
+## Reports, artifacts, and security
+
+Each launch creates `VCF91-Validation-Json-Run-YYYYMMDD-HHMMSS` under the current working directory. The run directory is the **log bundle**; **no diagnostic ZIP is created**. It contains the timestamped run log, `Debug-Artifacts` JSON evidence, worker stdout/stderr and result files where applicable, the readiness workbook or CSV fallback, generated bulk-commission JSON if requested, and a `Reports` subfolder for the executive HTML report.
+
+The workbook contains `Hosts` and, when detail rows exist, `Details` worksheets. If Excel export fails or ImportExcel is unavailable, the script writes host and detail CSV reports instead. The executive HTML report contains final host-outcome and validation-result charts, a host summary, and individual host details; N/A and not-run checks are separated from applicable pass counts. When a readiness report is written, the script attempts to open the HTML report automatically. **Open Run Folder** opens the run directory in Explorer without requiring an Excel file association.
+
+In remediation mode, details distinguish `Pre-reboot / ...`, `Reboot verification`, and, only after a verified reboot, `Post-reboot / ...`. The final host result is the post-reboot assessment if one runs; if no change was attempted, the initial assessment is final. A failed or unverified reboot does not trigger another pass.
+
+Worker input uses a Windows user-scoped protected password representation and the input file is normally removed after collection; this does **not** make the entire run directory secret-free. **Bulk commission JSON contains host passwords in plaintext.** Protect JSON, any password-bearing imported CSV, logs, diagnostics, worker output, and the run directory according to your access-control and retention policies. Review artifacts before attaching them to tickets.
+
+## Generate commission JSON (separate action)
+
+On the **JSON Generator** tab, optionally connect to SDDC Manager to load network-pool names, or type a network-pool name. Select a JSON storage type explicitly: `vSAN OSA`, `vSAN Remote`, `vSAN ESA`, `vSAN Max`, `NFS`, `VMFS on FC`, or `vVol`. The selected JSON type must agree with the `vSAN` or `External` host storage intent. Complete host credentials and required desired-configuration fields, then click **Generate JSON**. The tool writes `bulk-commission-hosts-YYYYMMDD-HHMMSS.json` into the run folder and attempts to open it in Notepad. This action is independent of whether readiness was run or passed; review readiness results before using the file for commissioning.
 
 ## Troubleshooting
 
-### Remediation did not start
+- **Run rejected before workers start:** check required DNS/search-domain/NTP fields, unique FQDNs matching the primary domain, explicit storage intent, valid drift threshold, and complete per-host or shared credentials. Review the run-review acknowledgment.
+- **Host was not remediated:** inspect `Connect/Run` and `Pre-reboot / ...` details. A failed connection or powered-on-VM preflight blocks host changes and reboot; maintenance mode alone does not block a standalone host.
+- **No reboot in remediation mode:** `RebootStatus: Not required` means no remediation was recorded or attempted. A failed preflight instead reports no reboot and a failed host result.
+- **Reboot requested but not verified:** inspect boot times, management reachability, reboot detail, run log, and worker stderr. The script does not send a second request after lost acknowledgement or timeout. Verify host state independently before manual action.
+- **Host returned but overall Fail:** inspect `Post-reboot / ...` rows, including NTP, IPv6, certificate name, storage classification, and SSH cleanup. A new remediation attempt requires a separately reviewed run.
+- **External-storage host shows vSAN Fail:** inspect `vdq`, vSAN ownership entries, and ESA storage-pool query evidence. The script does not turn unavailable evidence into `N/A` and does not automatically clean disks.
+- **No Excel report:** check for the host/detail CSV fallback and executive HTML under `Reports`; inspect the run log for export errors.
+- **UI appears idle or workers fail:** inspect the run log and `worker-*-stderr.log`; failed workers should be represented in the collected results when possible.
 
-Check that every target has a password and all required configuration fields are populated. Confirm the pre-run dialog was accepted. For a host that did not proceed, review the **Connect/Run** and reboot-verification details, including whether maintenance mode and the powered-on-VM preflight succeeded. A host that fails preflight is not remediated or rebooted.
+## v2.0 release baseline
 
-### Reboot was requested but not verified
+This README describes the accompanying v2.0 script: shared-password UI; explicit storage intent and configurable time drift; standalone-host powered-on-VM preflight without maintenance-mode gating; conditional single reboot with a 600-second boot-time check; disabled vSAN cleanup; password-free saved CSV; Excel/CSV and executive HTML reporting; run-folder bundle without ZIP; and independent bulk commission JSON generation. All active script version labels are v2.0; the prior embedded signature was removed from the modified copy and must not be treated as valid.
 
-Review the `Reboot verification` detail, the pre-reboot and observed boot times, host management reachability, and any worker stderr file. The tool does **not** issue another reboot when the first request loses acknowledgment or verification times out. Check host state out of band before taking manual action.
+**Operational note:** This tool is not a change-approval or host-commissioning approval system. Test with one host first, review network and storage impact, and confirm final host state before returning a host to service.
 
-### Host returned but the final result is Fail
+## Broadcom command reference
 
-Review the `Post-reboot / ...` rows. The tool does **not** apply fixes again, clean disks again, or reboot again. Remediate any remaining issues only through a **new, separately reviewed run** after investigating the failure.
-
-### IPv6 remains enabled after reboot
-
-Compare the pre-reboot IPv6 artifact with the post-reboot IPv6 detail. Missing or contradictory persistent-state evidence is a failure, not a pass. Assess networking impact before deciding whether to run another remediation cycle.
-
-### UI appears idle or workers exit immediately
-
-Inspect the on-disk run log and `worker-*-stderr.log` files. Worker script and input/output paths are quoted to support run directories containing spaces. A worker error should appear in the report's Details sheet.
-
-## Release notes
-
-### v1.7.4: simplified remediation controls
-
-- Removed the redundant, noninteractive **Reboot + revalidate** checkbox.
-- **Apply remediation** is now the sole workflow selection for one remediation pass, one authorized reboot request, and one automatic validation-only post-reboot pass.
-- Reboot authorization in the worker input is derived from **Apply remediation**; a mismatched worker input is rejected.
-- Kept the separate **Clean vSAN residue** opt-in, run-review confirmation, maintenance-mode/zero-powered-on-VM preflight, boot-time verification, bounded wait, and no-retry behavior.
-
-### v1.7.3: single reboot and automatic post-reboot validation
-
-- Added three bounded phases: remediation/pre-reboot evidence, one reboot request with boot-time verification, and one validation-only post-reboot pass.
-- Added a 20-minute reboot-verification wait. No reboot or remediation loop is performed.
-- Made the post-reboot result the final result when the reboot is verified; retained pre-reboot findings separately.
-
-### v1.7.2: safety and UI controls
-
-- Defaulted to validation-only mode and added a target/mode confirmation.
-- Added reboot preflight, accurate stop-queue behavior, explicit progress/mode text, and fail-closed IPv6 evidence handling.
-- Made prerequisite installation buttons correspond to their named modules; added Save As behavior for the example CSV.
-
-### v1.7.1: worker launch and password display
-
-- Quoted worker paths containing spaces and captured worker stderr.
-- Made empty password cells visibly empty and blocked runs with missing passwords.
-
-### v1.7: IPv6 diagnostics
-
-- Added persistent IPv6 before/after evidence, command-result artifacts, and the diagnostic ZIP.
-
-## Operational note
-
-This is an administrative automation tool, not an approval system. Review the selected hosts, planned reboots, networking dependencies, disk disposition, and diagnostic-artifact handling under your change-control process. Test with **one host first**. The script does not automatically return a host to service.
-
-## Broadcom references
-
-- ESX 9.x reboot and maintenance-mode procedure: https://knowledge.broadcom.com/external/article/394496/rebooting-shutting-down-esxi-host-vmwar.html
-- PowerCLI `Restart-VMHost` and `-Force` behavior: https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/restart-vmhost/
-****
-
-
-
+- [Restart-VMHost (`-Force` and `-Evacuate` semantics)](https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/restart-vmhost/)
+- [Get-VMHostService](https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/get-vmhostservice/)
